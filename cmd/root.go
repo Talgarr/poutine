@@ -21,6 +21,7 @@ import (
 	"github.com/boostsecurityio/poutine/providers/gitops"
 	"github.com/boostsecurityio/poutine/providers/scm"
 	scm_domain "github.com/boostsecurityio/poutine/providers/scm/domain"
+	"github.com/boostsecurityio/poutine/versioncheck"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/viper"
@@ -44,6 +45,7 @@ var config *models.Config = models.DefaultConfig()
 var skipRules []string
 var allowedRules []string
 var failOnViolation bool
+var disableVersionCheck bool
 
 // ErrViolationsFound is returned when violations are detected and --fail-on-violation is set.
 var ErrViolationsFound = errors.New("poutine: violations found")
@@ -88,7 +90,44 @@ By BoostSecurity.io - https://github.com/boostsecurityio/poutine `,
 			return strings.ToUpper(fmt.Sprintf("| %-6s|", i))
 		}
 		log.Logger = log.Output(output)
+
+		runVersionCheck(cmd)
 	},
+}
+
+// versionCheckSkipCommands lists subcommands that must not trigger the
+// version check: "mcp-server" speaks JSON-RPC over stdio (no point delaying
+// its handshake), and "completion" is invoked by shells for tab-completion
+// lookups. Other subcommands (including "version" and "help") still pay the
+// once-per-day check, since the 24h cache means at most one network call.
+var versionCheckSkipCommands = map[string]struct{}{
+	"mcp-server": {},
+	"completion": {},
+}
+
+// runVersionCheck performs the once-per-day update check unless disabled by
+// flag, env var, or config. Commands listed in versionCheckSkipCommands and
+// any subcommand under them are excluded so users can inspect the binary or
+// run the MCP server without triggering a network call.
+func runVersionCheck(cmd *cobra.Command) {
+	for c := cmd; c != nil; c = c.Parent() {
+		if _, skip := versionCheckSkipCommands[c.Name()]; skip {
+			return
+		}
+	}
+	disabled := disableVersionCheck || (config != nil && config.DisableVersionCheck)
+	result := versioncheck.Run(cmd.Context(), Version, disabled)
+	if result == nil || !result.UpdateAvailable {
+		return
+	}
+	target := result.LatestURL
+	if target == "" {
+		target = "https://github.com/boostsecurityio/poutine/releases"
+	}
+	log.Warn().
+		Str("current_version", Version).
+		Str("latest_version", result.LatestVersion).
+		Msgf("A new version of poutine is available: %s — %s", result.LatestVersion, target)
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -147,6 +186,7 @@ func init() {
 	RootCmd.PersistentFlags().StringSliceVar(&skipRules, "skip", []string{}, "Adds rules to the configured skip list for the current run (optional)")
 	RootCmd.PersistentFlags().StringSliceVar(&allowedRules, "allowed-rules", []string{}, "Overwrite the configured allowedRules list for the current run (optional)")
 	RootCmd.PersistentFlags().BoolVar(&failOnViolation, "fail-on-violation", false, "Exit with a non-zero code (10) when violations are found")
+	RootCmd.PersistentFlags().BoolVar(&disableVersionCheck, "disable-version-check", false, "Disable the once-per-day check for newer poutine releases")
 
 	_ = viper.BindPFlag("quiet", RootCmd.PersistentFlags().Lookup("quiet"))
 }
