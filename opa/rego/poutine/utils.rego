@@ -282,7 +282,7 @@ _checkout_semver(ref) := sprintf("%s.0", [trim_prefix(ref, "v")]) if {
 }
 
 _checkout_semver(ref) := version if {
-	regex.match(`^v[0-9]+\.[0-9]+\.[0-9]+$`, ref)
+	regex.match(`^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`, ref)
 	version := trim_prefix(ref, "v")
 	semver.is_valid(version)
 }

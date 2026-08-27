@@ -239,6 +239,53 @@ func TestCheckoutForkPRGuard(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "prerelease below fixed floor",
+			input: checkoutGuardInput(
+				[]map[string]interface{}{{"name": "pull_request_target"}},
+				"actions/checkout@v2.8.0-rc.1",
+				nil,
+				nil,
+			),
+		},
+		{
+			name: "build metadata at fixed floor",
+			input: checkoutGuardInput(
+				[]map[string]interface{}{{"name": "pull_request_target"}},
+				"actions/checkout@v2.8.0+build.1",
+				nil,
+				nil,
+			),
+			want: true,
+		},
+		{
+			name: "v1 prerelease",
+			input: checkoutGuardInput(
+				[]map[string]interface{}{{"name": "pull_request_target"}},
+				"actions/checkout@v1.2.3-alpha.1",
+				nil,
+				nil,
+			),
+		},
+		{
+			name: "numeric prerelease follows Rego semver",
+			input: checkoutGuardInput(
+				[]map[string]interface{}{{"name": "pull_request_target"}},
+				"actions/checkout@v2.8.0-01",
+				nil,
+				nil,
+			),
+		},
+		{
+			name: "invalid empty prerelease identifier",
+			input: checkoutGuardInput(
+				[]map[string]interface{}{{"name": "pull_request_target"}},
+				"actions/checkout@v2.8.0-alpha..1",
+				nil,
+				nil,
+			),
+			want: true,
+		},
+		{
 			name: "vulnerable v1 major ref",
 			input: checkoutGuardInput(
 				[]map[string]interface{}{{"name": "pull_request_target"}},
