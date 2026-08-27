@@ -1,10 +1,12 @@
 package models
 
 import (
+	"encoding/json"
+	"testing"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
-	"testing"
 )
 
 func TestGithubActionsWorkflowJobs(t *testing.T) {
@@ -12,12 +14,16 @@ func TestGithubActionsWorkflowJobs(t *testing.T) {
 		Name     string
 		Input    string
 		Expected GithubActionsJob
-		Error    bool
+		// Error is only for genuinely malformed YAML (lexer/syntax errors).
+		Error bool
+		// Dropped means the parser leniently skips the whole job (or all jobs),
+		// yielding zero jobs without returning an error.
+		Dropped bool
 	}{
 		{
-			Name:  "empty",
-			Input: `[]`,
-			Error: true,
+			Name:    "empty",
+			Input:   `[]`,
+			Dropped: true,
 		},
 		{
 			Name:  "empty job",
@@ -66,56 +72,86 @@ func TestGithubActionsWorkflowJobs(t *testing.T) {
 			},
 		},
 		{
+			// Lenient: a sequence containing a non-string entry can't populate
+			// labels, so runs-on ends up empty but the job is still parsed.
 			Name:  "runs-on with empty labels",
 			Input: `build: {runs-on: { labels: [ {} ] }}`,
-			Error: true,
+			Expected: GithubActionsJob{
+				ID:    "build",
+				Lines: map[string]int{"start": 1, "runs_on": 1},
+			},
 		},
 		{
 			Name:  "runs-on with empty string labels",
 			Input: `build: {runs-on: { labels: [ "" ] }}`,
-			Error: true,
+			Expected: GithubActionsJob{
+				ID:    "build",
+				Lines: map[string]int{"start": 1, "runs_on": 1},
+			},
 		},
 		{
 			Name:  "runs-on with empty string group",
 			Input: `build: {runs-on: { group: [ "" ] }}`,
-			Error: true,
+			Expected: GithubActionsJob{
+				ID:    "build",
+				Lines: map[string]int{"start": 1, "runs_on": 1},
+			},
 		},
 		{
 			Name:  "runs-on with empty object",
 			Input: `build: {runs-on: [ {}]}`,
-			Error: true,
+			Expected: GithubActionsJob{
+				ID:    "build",
+				Lines: map[string]int{"start": 1, "runs_on": 1},
+			},
 		},
 		{
-			Name:  "empty build",
-			Input: `build: []`,
-			Error: true,
+			// A job whose body is a sequence can't decode into a job struct, so
+			// it is skipped entirely rather than aborting the whole workflow.
+			Name:    "empty build",
+			Input:   `build: []`,
+			Dropped: true,
 		},
 		{
+			// Unknown permission scalar leaves permissions empty; job survives.
 			Name:  "invalid permissions",
 			Input: `build: {permissions: foobar}`,
-			Error: true,
+			Expected: GithubActionsJob{
+				ID: "build",
+			},
 		},
 		{
 			Name:  "invalid permissions list",
 			Input: `build: {permissions: [foobar]}`,
-			Error: true,
+			Expected: GithubActionsJob{
+				ID: "build",
+			},
 		},
 		{
 			Name:  "invalid env",
 			Input: `build: {env: foobar}`,
-			Error: true,
+			Expected: GithubActionsJob{
+				ID: "build",
+			},
 		},
 		{
+			// The malformed step is dropped; the job is still parsed.
 			Name:  "invalid steps",
 			Input: `build: {steps: [foobar]}`,
-			Error: true,
+			Expected: GithubActionsJob{
+				ID: "build",
+			},
 		},
 		{
 			Name:  "invalid secrets",
 			Input: `build: {secrets: []}`,
-			Error: true,
+			Expected: GithubActionsJob{
+				ID: "build",
+			},
 		},
 		{
+			// `[]]` is a YAML syntax error, surfaced by the lexer regardless of
+			// our lenient node handling.
 			Name:  "invalid outputs",
 			Input: `build: {outputs: []]}`,
 			Error: true,
@@ -141,12 +177,15 @@ func TestGithubActionsWorkflowJobs(t *testing.T) {
 			},
 		},
 		{
+			// Container that can't decode is left empty; job survives.
 			Name:  "invalid container empty list",
 			Input: `build: {container: []}`,
-			Error: true,
+			Expected: GithubActionsJob{
+				ID: "build",
+			},
 		},
 		{
-			Name:  "invalid container empty list",
+			Name:  "valid permissions object",
 			Input: `build: {permissions: {contents: read}}`,
 			Expected: GithubActionsJob{
 				ID: "build",
@@ -184,9 +223,12 @@ func TestGithubActionsWorkflowJobs(t *testing.T) {
 			},
 		},
 		{
+			// Environment that can't decode is left empty; job survives.
 			Name:  "invalid empty environment",
 			Input: `build: {environment: []}`,
-			Error: true,
+			Expected: GithubActionsJob{
+				ID: "build",
+			},
 		},
 		{
 			Name:  "single dimension matrix",
@@ -290,6 +332,10 @@ func TestGithubActionsWorkflowJobs(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+			if tt.Dropped {
+				require.Empty(t, jobs)
+				return
+			}
 			require.Len(t, jobs, 1)
 
 			got := jobs[0]
@@ -331,8 +377,11 @@ func TestGithubActionsWorkflowEvents(t *testing.T) {
 			},
 		},
 		{
+			// branches as a mapping can't populate the list; left empty.
 			Input: `push: {branches: {}}`,
-			Error: true,
+			Expected: GithubActionsEvents{
+				{Name: "push"},
+			},
 		},
 		{
 			Input: `push: {branches: [main]}`,
@@ -353,12 +402,17 @@ func TestGithubActionsWorkflowEvents(t *testing.T) {
 			},
 		},
 		{
+			// cron entries without a `cron` key are skipped individually.
 			Input: `schedule: [error: "s1"]`,
-			Error: true,
+			Expected: GithubActionsEvents{
+				{Name: "schedule"},
+			},
 		},
 		{
-			Input: `schedule: "* * * *"`,
-			Error: true,
+			// A scalar schedule can't decode into cron objects; the event is
+			// skipped, leaving no events (but no error).
+			Input:    `schedule: "* * * *"`,
+			Expected: GithubActionsEvents{},
 		},
 		{
 			Input: `workflow_run: {workflows: ["w1"], types: [requested]}`,
@@ -372,15 +426,22 @@ func TestGithubActionsWorkflowEvents(t *testing.T) {
 		},
 		{
 			Input: `workflow_call: { inputs: [], }`,
-			Error: true,
+			Expected: GithubActionsEvents{
+				{Name: "workflow_call"},
+			},
 		},
 		{
+			// The malformed input is skipped; the event survives.
 			Input: `workflow_call: { inputs: {name: []}, }`,
-			Error: true,
+			Expected: GithubActionsEvents{
+				{Name: "workflow_call"},
+			},
 		},
 		{
 			Input: `workflow_call: { outputs: [], }`,
-			Error: true,
+			Expected: GithubActionsEvents{
+				{Name: "workflow_call"},
+			},
 		},
 		{
 			Input: `workflow_call: { outputs: { name: asdf }, }`,
@@ -397,8 +458,11 @@ func TestGithubActionsWorkflowEvents(t *testing.T) {
 			},
 		},
 		{
+			// The malformed output is skipped; the event survives.
 			Input: `workflow_call: { outputs: { name: { name: {} } }, }`,
-			Error: true,
+			Expected: GithubActionsEvents{
+				{Name: "workflow_call"},
+			},
 		},
 		{
 			Input: `workflow_call: {
@@ -594,6 +658,124 @@ jobs:
 	assert.Equal(t, "*ALL", workflow.Jobs[1].Secrets[0].Name)
 
 	assert.Equal(t, "alpine:latest", workflow.Jobs[2].Container.Image)
+}
+
+// TestGithubActionsWorkflowLenientResilience verifies that locally-malformed
+// sub-nodes are skipped without aborting the whole-file parse. Previously any
+// one of these constructs caused yaml.Unmarshal to error, which made the
+// scanner silently drop the entire workflow (a false-negative / scan-evasion
+// risk). The workflow must still be valid and retain all of its well-formed
+// content.
+func TestGithubActionsWorkflowLenientResilience(t *testing.T) {
+	subject := `
+name: CI
+on:
+  push:
+    branches: {}            # wrong shape, ignored
+  schedule:
+    - cron: ""              # empty cron, skipped individually
+    - cron: "0 0 * * 0"     # kept
+jobs:
+  good:
+    runs-on: ubuntu-latest
+    permissions: not-a-real-value   # invalid scalar -> empty perms, job kept
+    steps:
+      - uses: actions/checkout@v4
+      - foobar                       # malformed step -> dropped
+      - run: make build
+  broken: []                         # whole job can't decode -> dropped
+`
+	var wf GithubActionsWorkflow
+	err := yaml.Unmarshal([]byte(subject), &wf)
+
+	// The file as a whole must still parse and be considered valid for scanning.
+	require.NoError(t, err)
+	assert.True(t, wf.IsValid(), "workflow should remain valid despite malformed sub-nodes")
+
+	// Events: push survives (with empty branches) and schedule keeps only the
+	// well-formed cron entry.
+	require.Len(t, wf.Events, 2)
+	assert.Equal(t, "push", wf.Events[0].Name)
+	assert.Empty(t, wf.Events[0].Branches)
+	assert.Equal(t, "schedule", wf.Events[1].Name)
+	assert.Equal(t, []string{"0 0 * * 0"}, []string(wf.Events[1].Cron))
+
+	// The undecodable `broken` job is dropped; the good job is retained.
+	require.Len(t, wf.Jobs, 1)
+	good := wf.Jobs[0]
+	assert.Equal(t, "good", good.ID)
+	assert.Equal(t, GithubActionsJobRunsOn{"ubuntu-latest"}, good.RunsOn)
+	assert.Empty(t, good.Permissions, "invalid permission scalar should yield empty permissions, not drop the job")
+
+	// The malformed step is dropped but the surrounding steps survive.
+	require.Len(t, good.Steps, 2)
+	assert.Equal(t, "actions/checkout@v4", good.Steps[0].Uses)
+	assert.Equal(t, "make build", good.Steps[1].Run)
+}
+
+// TestGithubActionsParallelStepsFlattened verifies that `parallel:` step blocks
+// are flattened inline so their nested run/uses sinks remain visible to rules.
+func TestGithubActionsParallelStepsFlattened(t *testing.T) {
+	input := `build:
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v6
+    - parallel:
+        - name: Build frontend
+          run: npm run build:frontend
+        - name: Build backend
+          run: npm run build:backend
+    - name: Run tests
+      run: npm test
+`
+	var jobs GithubActionsJobs
+	require.NoError(t, yaml.Unmarshal([]byte(input), &jobs))
+	require.Len(t, jobs, 1)
+
+	steps := jobs[0].Steps
+	require.Len(t, steps, 4)
+	assert.Equal(t, "actions/checkout@v6", steps[0].Uses)
+	assert.Equal(t, "npm run build:frontend", steps[1].Run)
+	assert.Equal(t, "npm run build:backend", steps[2].Run)
+	assert.Equal(t, "npm test", steps[3].Run)
+	// Each flattened child keeps its own line number.
+	assert.Equal(t, 6, steps[1].Line)
+	assert.Equal(t, 8, steps[2].Line)
+
+	// Steps outside the parallel block are not tagged.
+	assert.False(t, steps[0].Parallel)
+	assert.False(t, steps[3].Parallel)
+	// Parallel children carry the flag.
+	assert.True(t, steps[1].Parallel)
+	assert.True(t, steps[2].Parallel)
+
+	// The flag is present in the JSON handed to rego.
+	blob, err := json.Marshal(steps[1])
+	require.NoError(t, err)
+	assert.Contains(t, string(blob), `"parallel":true`)
+	// Non-parallel steps omit it entirely.
+	blob, err = json.Marshal(steps[0])
+	require.NoError(t, err)
+	assert.NotContains(t, string(blob), "parallel")
+
+	t.Run("nested parallel all tagged", func(t *testing.T) {
+		nested := `build:
+  steps:
+    - parallel:
+        - parallel:
+            - run: a
+            - run: b
+        - run: c
+`
+		var jobs GithubActionsJobs
+		require.NoError(t, yaml.Unmarshal([]byte(nested), &jobs))
+		steps := jobs[0].Steps
+		require.Len(t, steps, 3)
+		assert.Equal(t, []string{"a", "b", "c"}, []string{steps[0].Run, steps[1].Run, steps[2].Run})
+		for _, s := range steps {
+			assert.True(t, s.Parallel)
+		}
+	})
 }
 
 func TestGithubActionMetadata(t *testing.T) {
