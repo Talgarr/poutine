@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -416,7 +417,11 @@ func TestCheckoutGuardData(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, vulnerableSHAs, 223)
 	digest := sha256.Sum256([]byte(strings.Join(vulnerableSHAs, "\n")))
-	assert.Equal(t, "017930673376b24e4bff0fa4bd8fd9c4c196da4b6cd5eb193b421032b43598c1", fmt.Sprintf("%x", digest))
+	assert.Equal(
+		t,
+		"017930673376b24e4bff0fa4bd8fd9c4c196da4b6cd5eb193b421032b43598c1",
+		hex.EncodeToString(digest[:]),
+	)
 
 }
 
