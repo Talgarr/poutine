@@ -26,24 +26,11 @@ results contains poutine.finding(rule, pkg.purl, {
 }) if {
 	pkg := input.packages[_]
 	workflow = pkg.github_actions_workflows[_]
-	job := workflow.jobs[_]
 
 	utils.filter_workflow_events(workflow, github.events)
 
-	utils.empty(workflow.permissions)
-	utils.empty(job.permissions)
-}
-
-results contains poutine.finding(rule, pkg.purl, {
-	"path": workflow.path,
-	"event_triggers": [event | event := workflow.events[j].name],
-}) if {
-	pkg := input.packages[_]
-	workflow = pkg.github_actions_workflows[_]
+	workflow.permissions == null
+  
 	job := workflow.jobs[_]
-
-	utils.filter_workflow_events(workflow, github.events)
-
-	not workflow.permissions
-	not job.permissions
+	job.permissions == null
 }
